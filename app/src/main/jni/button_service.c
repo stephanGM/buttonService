@@ -1,5 +1,3 @@
-//TODO check to see app isnt uninstalled on device shutdown
-//TODO check permission for startup
 /**
 * ====================================================================
 * rotary-encoder-service.c:
@@ -42,8 +40,11 @@
 #endif
 
 /* define the GPIO pins to be used!!!! */
-static const int gpio1 = 17;
-static const int gpio2 = 22;
+static const int gpio1 = 2;
+static const int gpio2 = 21;
+static const int numOfButtons = 2;
+static const int gpios[2] = {2,21};
+
 
 int fsm(int previousState, int currentState);
 int concantenate(int x, int y);
@@ -56,6 +57,13 @@ typedef enum {
     false,
     true
 }bool;
+
+/**
+ * stateA is initial state
+ * stateB is a single press
+ * stateC is a double-tap
+ * stateD is a long single press
+ */
 enum {
     stateA = 00,
     stateB = 01,
@@ -66,11 +74,6 @@ bool sentinel = true;   /* indicates 1st run -> get initial (previous) state */
                         /* if state is invalid sentinel = true i.e restart */
 int currentState;
 int previousState;
-/* define arguments to pass to the thread */
-struct thread_data{
-    int gpio1;
-    int gpio2;
-};
 /* cache jvm stuff to be used in thread */
 static JavaVM *jvm;
 static jclass cls;
@@ -101,9 +104,6 @@ Java_com_google_hal_buttonservice_ButtonService_startRoutine(JNIEnv *env, jclass
     /* cls is made a global to be used in the spawned thread*/
     cls = (jclass)(*env)->NewGlobalRef(env,type);
 
-    struct thread_data gpios;  /* */
-    gpios.gpio1 = gpio1; /* set them as the given gpio numbers */
-    gpios.gpio2 = gpio2;
     pthread_t routine_thread; /*create routine thread */
     if (pthread_create( &routine_thread, NULL, routine, NULL)) {
         LOGD("Error creating thread");
@@ -124,9 +124,6 @@ Java_com_google_hal_buttonservice_ButtonService_startRoutine(JNIEnv *env, jclass
 */
  void *routine(){
 
-    LOGD("gpio1 is %d", gpio1);
-    LOGD("gpio2 is %d", gpio2);
-
     /* get a new environment and attach this new thread to jvm */
     JNIEnv* newEnv;
     JavaVMAttachArgs args;
@@ -135,57 +132,54 @@ Java_com_google_hal_buttonservice_ButtonService_startRoutine(JNIEnv *env, jclass
     args.group = NULL; /* thread group */
     (*jvm)->AttachCurrentThread(jvm,&newEnv,&args);
     /* get method ID to call back to Java */
-    jmethodID mid = (*newEnv)->GetMethodID(newEnv, cls, "handleStateChange", "(I)V");
+    jmethodID mid = (*newEnv)->GetMethodID(newEnv, cls, "jniReturn", "(I)V");
     jmethodID construct = (*newEnv)->GetMethodID(newEnv,cls,"<init>","()V");
     jobject obj = (*newEnv)->NewObject(newEnv, cls, construct);
 
 
     /* initialization of vars */
-    struct pollfd pfd[2];
-    int fd1, fd2;
-    char str1[256], str2[256];
-    char buf1[8], buf2[8];
-    sprintf(str1, "/sys/class/gpio/gpio%d/value", gpio1);
-    sprintf(str2, "/sys/class/gpio/gpio%d/value", gpio2);
+    struct pollfd pfd[numOfButtons];
+    int fds[numOfButtons];
+    const char gpioValLocations[numOfButtons][256];
+    int i =0;
+    for (i = 0; i < numOfButtons ; i += 1){
+        sprintf(gpioValLocations[i], "/sys/class/gpio/gpio%d/value", gpios[i]);
+    }
+    char buffers[numOfButtons][8];
 
     /* open file descriptors */
-    if ((fd1 = open(str1, O_RDONLY)) < 0) {
-        LOGD("failed on 1st open");
-        exit(1);
+    for (i = 0; i < numOfButtons; i+=1){
+        if ((fds[i]= open(gpioValLocations[i],O_RDONLY)) < 0) {
+            LOGD("failed on 1st open");
+            exit(1);
+        }
+        pfd[i].fd = fds[i];  /* configure poll struct */
+        pfd[i].events = POLLIN;
+        lseek(fds[i], 0, SEEK_SET); /* consume any prior interrupts*/
+        read(fds[i], buffers[i], sizeof buffers[i]);
     }
-    if ((fd2 = open(str2, O_RDONLY)) < 0) {
-        LOGD("failed on 2nd open");
-        exit(1);
-    }
+
     //TODO change POLLIN to POLLPRI if device has functional sysfs gpio interface
-    /* configure poll struct */
-    pfd[0].fd = fd1;
-    pfd[1].fd = fd2;
-    pfd[0].events = POLLIN;
-    pfd[1].events = POLLIN;
-
-    lseek(fd1, 0, SEEK_SET); /* consume any prior interrupt on ch1*/
-    read(fd1, buf1, sizeof buf1);
-    lseek(fd2, 0, SEEK_SET); /* consume any prior interrupt on ch2*/
-    read(fd2, buf2, sizeof buf2);
-
+    //TODO if POLLPRI change 3rd arg of poll() to -1
     for (;;) {
         /* wait for interrupt */
-        poll(pfd, 2, 1000000);
-        if ((pfd[0].revents & POLLIN) | (pfd[1].revents & POLLIN)) {
+        poll(pfd, numOfButtons, 1);
+        for(i=0; i <  numOfButtons; i+=1){
+            if ((pfd[i].revents & POLLIN)) {
             /*interrupt received */
             /* consume interrupts & read values */
-            if (lseek(fd1, 0, SEEK_SET) == -1) break;
-            if (read(fd1, buf1, sizeof buf1) == -1) break;
-            if (lseek(fd2, 0, SEEK_SET) == -1) break;
-            if (read(fd2, buf2, sizeof buf2) == -1) break;
-            get_direction(buf1,buf2,newEnv,obj,mid);
+                if (lseek(fds[i], 0, SEEK_SET) == -1) goto houstonWeHaveAProblem; /* on little goto is not the end of the world, please remain calm */
+                if (read(fds[i], buffers[i], sizeof buffers[i]) == -1) goto houstonWeHaveAProblem;
+            }
+            get_direction(buffers[0],buffers[1],newEnv,obj,mid);
         }
     }
     /* shutdown */
+    houstonWeHaveAProblem:
     LOGD("Reading Terminated");
-    close(fd1);
-    close(fd2);
+    for (i = 0; i < numOfButtons; i += 1){
+        close(fds[i]);
+    }
     (*jvm)->DetachCurrentThread(jvm);
     pthread_exit(NULL);
  }

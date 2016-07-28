@@ -12,7 +12,7 @@ import android.widget.Toast;
 public class ButtonService extends Service {
 
     private static Context MyContext; /* get context to use from JNI */
-    private static final String TAG = "PushbuttonService";
+    private static final String TAG = "buttonService";
 
     @Override
     public IBinder onBind(Intent intent) {
@@ -20,7 +20,7 @@ public class ButtonService extends Service {
     }
 
     public void onDestroy() {
-        Toast.makeText(this, "GPIO Interface Terminated", Toast.LENGTH_SHORT).show();
+        Toast.makeText(this, "Pushbutton Interface Terminated", Toast.LENGTH_SHORT).show();
         Log.d(TAG, "onDestroy");
     }
 
@@ -28,7 +28,7 @@ public class ButtonService extends Service {
     public int onStartCommand(Intent intent,int flags, int startid)
     {
         MyContext = getApplicationContext(); /* get the context to use later from JNI */
-        Toast.makeText(this, "GPIO Interface Running", Toast.LENGTH_SHORT).show();
+        Toast.makeText(this, "Pushbutton Interface Running", Toast.LENGTH_SHORT).show();
         Log.d(TAG, "onStart");
         startRoutine(); /* call the C fn that begins the ISR thread w desired gpio pin #s */
         return START_STICKY;
@@ -67,7 +67,7 @@ public class ButtonService extends Service {
      * authors(s): Stephan Greto-McGrath
      * ====================================================================
      */
-    public void handleStateChange(int direction){
+    public void jniReturn(int direction){
         String direc;
         if (direction == 0){
             direc = "COUNTER_CLOCKWISE";

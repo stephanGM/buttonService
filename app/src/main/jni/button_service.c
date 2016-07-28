@@ -42,13 +42,15 @@
 /* define the GPIO pins to be used!!!! */
 static const int gpio1 = 2;
 static const int gpio2 = 21;
-static const int numOfButtons = 2;
+static const int num_buttons = 2;
 static const int gpios[2] = {2,21};
+static const int num_threads = 2;
 
 
 int fsm(int previousState, int currentState);
 int concantenate(int x, int y);
 void get_direction(char buf1[8], char buf2[8], JNIEnv *env, jobject obj,jmethodID mid);
+void *master();
 void *routine();
 void setup_gpios();
 static int gpio_export(int pin);
@@ -104,11 +106,29 @@ Java_com_google_hal_buttonservice_ButtonService_startRoutine(JNIEnv *env, jclass
     /* cls is made a global to be used in the spawned thread*/
     cls = (jclass)(*env)->NewGlobalRef(env,type);
 
-    pthread_t routine_thread; /*create routine thread */
-    if (pthread_create( &routine_thread, NULL, routine, NULL)) {
-        LOGD("Error creating thread");
-        exit(1);
+    pthread_t threads[num_threads];
+    pthread_create(&threads[0], NULL, master, NULL);
+    pthread_create(&threads[1], NULL, routine, NULL);
+    pthread_join(threads[0], NULL);
+    pthread_join(threads[1],NULL);
+
+}
+
+void *master(){
+    /* get a new environment and attach this new thread to jvm */
+    JNIEnv* masterEnv;
+    JavaVMAttachArgs args;
+    args.version = JNI_VERSION_1_6; /* JNI version */
+    args.name = NULL; /* thread name */
+    args.group = NULL; /* thread group */
+    (*jvm)->AttachCurrentThread(jvm,&masterEnv,&args);
+
+    for(;;){
+        LOGD("master is running");
+        sleep(1);
     }
+    (*jvm)->DetachCurrentThread(jvm);
+    pthread_exit(NULL);
 }
 
 /**
@@ -125,30 +145,30 @@ Java_com_google_hal_buttonservice_ButtonService_startRoutine(JNIEnv *env, jclass
  void *routine(){
 
     /* get a new environment and attach this new thread to jvm */
-    JNIEnv* newEnv;
+    JNIEnv* routineEnv;
     JavaVMAttachArgs args;
     args.version = JNI_VERSION_1_6; /* JNI version */
     args.name = NULL; /* thread name */
     args.group = NULL; /* thread group */
-    (*jvm)->AttachCurrentThread(jvm,&newEnv,&args);
+    (*jvm)->AttachCurrentThread(jvm,&routineEnv,&args);
     /* get method ID to call back to Java */
-    jmethodID mid = (*newEnv)->GetMethodID(newEnv, cls, "jniReturn", "(I)V");
-    jmethodID construct = (*newEnv)->GetMethodID(newEnv,cls,"<init>","()V");
-    jobject obj = (*newEnv)->NewObject(newEnv, cls, construct);
+    jmethodID mid = (*routineEnv)->GetMethodID(routineEnv, cls, "jniReturn", "(I)V");
+    jmethodID construct = (*routineEnv)->GetMethodID(routineEnv,cls,"<init>","()V");
+    jobject obj = (*routineEnv)->NewObject(routineEnv, cls, construct);
 
 
     /* initialization of vars */
-    struct pollfd pfd[numOfButtons];
-    int fds[numOfButtons];
-    const char gpioValLocations[numOfButtons][256];
+    struct pollfd pfd[num_buttons];
+    int fds[num_buttons];
+    const char gpioValLocations[num_buttons][256];
     int i =0;
-    for (i = 0; i < numOfButtons ; i += 1){
+    for (i = 0; i < num_buttons ; i += 1){
         sprintf(gpioValLocations[i], "/sys/class/gpio/gpio%d/value", gpios[i]);
     }
-    char buffers[numOfButtons][8];
+    char buffers[num_buttons][8];
 
     /* open file descriptors */
-    for (i = 0; i < numOfButtons; i+=1){
+    for (i = 0; i < num_buttons; i+=1){
         if ((fds[i]= open(gpioValLocations[i],O_RDONLY)) < 0) {
             LOGD("failed on 1st open");
             exit(1);
@@ -163,21 +183,21 @@ Java_com_google_hal_buttonservice_ButtonService_startRoutine(JNIEnv *env, jclass
     //TODO if POLLPRI change 3rd arg of poll() to -1
     for (;;) {
         /* wait for interrupt */
-        poll(pfd, numOfButtons, 1);
-        for(i=0; i <  numOfButtons; i+=1){
+        poll(pfd, num_buttons, 1);
+        for(i=0; i <  num_buttons; i+=1){
             if ((pfd[i].revents & POLLIN)) {
             /*interrupt received */
             /* consume interrupts & read values */
                 if (lseek(fds[i], 0, SEEK_SET) == -1) goto houstonWeHaveAProblem; /* on little goto is not the end of the world, please remain calm */
                 if (read(fds[i], buffers[i], sizeof buffers[i]) == -1) goto houstonWeHaveAProblem;
             }
-            get_direction(buffers[0],buffers[1],newEnv,obj,mid);
+            get_direction(buffers[0],buffers[1],routineEnv,obj,mid);
         }
     }
     /* shutdown */
     houstonWeHaveAProblem:
     LOGD("Reading Terminated");
-    for (i = 0; i < numOfButtons; i += 1){
+    for (i = 0; i < num_buttons; i += 1){
         close(fds[i]);
     }
     (*jvm)->DetachCurrentThread(jvm);
@@ -193,7 +213,7 @@ Java_com_google_hal_buttonservice_ButtonService_startRoutine(JNIEnv *env, jclass
 * authors(s): Stephan Greto-McGrath
 * ====================================================================
 */
-void get_direction(char buf1[8], char buf2[8], JNIEnv *newEnv, jobject obj, jmethodID mid){
+void get_direction(char buf1[8], char buf2[8], JNIEnv *routineEnv, jobject obj, jmethodID mid){
     if (sentinel != true) {  /* we already have a prev state */
         previousState = currentState;
         currentState = concantenate(atoi(buf1), atoi(buf2));
@@ -204,7 +224,7 @@ void get_direction(char buf1[8], char buf2[8], JNIEnv *newEnv, jobject obj, jmet
         if (previousState != currentState) {
             int direction = fsm(currentState, previousState);
             LOGD("direction: %d\n", direction);
-            (*newEnv)->CallVoidMethod(newEnv, obj, mid, (jint)direction); /* call back to java */
+            (*routineEnv)->CallVoidMethod(routineEnv, obj, mid, (jint)direction); /* call back to java */
                                                                     /* act on state change */
         }
     } else { /* just starting -> need prev state */

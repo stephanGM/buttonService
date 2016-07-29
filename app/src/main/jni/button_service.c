@@ -30,6 +30,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
+#include <string.h>
 #include <unistd.h>
 #include <android/log.h>
 #define LOG_TAG "GPIO"
@@ -74,6 +75,8 @@ enum {
 };
 bool sentinel = true;   /* indicates 1st run -> get initial (previous) state */
                         /* if state is invalid sentinel = true i.e restart */
+bool first_run = true;
+bool first_press = true; /* indicates a press in not yet a double tap */
 int currentState;
 int previousState;
 /* cache jvm stuff to be used in thread */
@@ -109,9 +112,11 @@ Java_com_google_hal_buttonservice_ButtonService_startRoutine(JNIEnv *env, jclass
     pthread_t threads[num_threads];
     pthread_create(&threads[0], NULL, master, NULL);
     pthread_create(&threads[1], NULL, routine, NULL);
-    pthread_join(threads[0], NULL);
-    pthread_join(threads[1],NULL);
-
+    //TODO figure out why joining threads causes crash when input lvls are high
+//    int k;
+//    for (k=0; k<num_threads; k++){
+//        pthread_join(threads[k],NULL);
+//    }
 }
 
 void *master(){
@@ -123,10 +128,10 @@ void *master(){
     args.group = NULL; /* thread group */
     (*jvm)->AttachCurrentThread(jvm,&masterEnv,&args);
 
-    for(;;){
-        LOGD("master is running");
-        sleep(1);
-    }
+//    for(;;){
+//        LOGD("master is running");
+//        sleep(1);
+//    }
     (*jvm)->DetachCurrentThread(jvm);
     pthread_exit(NULL);
 }
@@ -161,14 +166,17 @@ void *master(){
     struct pollfd pfd[num_buttons];
     int fds[num_buttons];
     const char gpioValLocations[num_buttons][256];
-    int i =0;
-    for (i = 0; i < num_buttons ; i += 1){
+    int i, j;
+    for (i = 0; i < num_buttons ; i++){
         sprintf(gpioValLocations[i], "/sys/class/gpio/gpio%d/value", gpios[i]);
     }
-    char buffers[num_buttons][8];
+    /* using sizeof(char) + 1 = 2 as input is a 1 or 0*/
+    char buffers[num_buttons][2];
+    char prev_buffers[num_buttons][2];
+    char temp_buffers[num_buttons][2];
 
     /* open file descriptors */
-    for (i = 0; i < num_buttons; i+=1){
+    for (i = 0; i < num_buttons; i++){
         if ((fds[i]= open(gpioValLocations[i],O_RDONLY)) < 0) {
             LOGD("failed on 1st open");
             exit(1);
@@ -180,24 +188,28 @@ void *master(){
     }
 
     //TODO change POLLIN to POLLPRI if device has functional sysfs gpio interface
-    //TODO if POLLPRI change 3rd arg of poll() to -1
+    //TODO if POLLPRI: change 3rd arg of poll() to -1
     for (;;) {
-        /* wait for interrupt */
         poll(pfd, num_buttons, 1);
-        for(i=0; i <  num_buttons; i+=1){
+
+        /* wait for interrupt */
+        for(i=0; i < num_buttons; i++){
             if ((pfd[i].revents & POLLIN)) {
-            /*interrupt received */
-            /* consume interrupts & read values */
-                if (lseek(fds[i], 0, SEEK_SET) == -1) goto houstonWeHaveAProblem; /* on little goto is not the end of the world, please remain calm */
+                /* copy current values to compare to next to detected change */
+                memcpy(prev_buffers[i], buffers[i],2);
+                /* read new values */
+                if (lseek(fds[i], 0, SEEK_SET) == -1) goto houstonWeHaveAProblem; /* one little goto is not the end of the world, please remain calm */
                 if (read(fds[i], buffers[i], sizeof buffers[i]) == -1) goto houstonWeHaveAProblem;
+                if (atoi(prev_buffers[i]) != atoi(buffers[i])) {
+                    LOGD("change detected");
+                }
             }
-            get_direction(buffers[0],buffers[1],routineEnv,obj,mid);
         }
     }
     /* shutdown */
     houstonWeHaveAProblem:
     LOGD("Reading Terminated");
-    for (i = 0; i < num_buttons; i += 1){
+    for (i = 0; i < num_buttons; i++){
         close(fds[i]);
     }
     (*jvm)->DetachCurrentThread(jvm);

@@ -34,26 +34,19 @@
 #endif
 
 /* define the GPIO pins to be used!!!! */
-static const int gpio1 = 2;
-static const int gpio2 = 21;
-static const int num_buttons = 2;
 static const int gpios[2] = {2,21};
-
+static const int num_buttons = 2; /* num of buttons should correspond to num of gpios*/
 /* create a thread array */
 pthread_t threads[4];
-
-/* function declarations */
-int fsm(int previousState, int currentState);
-int concantenate(int x, int y);
-void get_direction(char buf1[8], char buf2[8], JNIEnv *env, jobject obj,jmethodID mid);
+/* gpio configuration functions */
+void setup_gpios();
+static int gpio_export(int pin);
+static int set_edge(int pin, int edge);
+/* threads */
 void *master();
 void *routine();
 void *single_press();
 void *long_press();
-void setup_gpios();
-static int gpio_export(int pin);
-static int set_edge(int pin, int edge);
-
 /* define a bool */
 typedef enum {
     false,
@@ -105,10 +98,10 @@ Java_com_google_hal_buttonservice_ButtonService_startRoutine(JNIEnv *env, jclass
     }
     /* cls is made a global to be used in the spawned thread*/
     cls = (jclass)(*env)->NewGlobalRef(env,type);
-
+    /* create the threads */
     pthread_create(&threads[0], NULL, master, NULL);
     pthread_create(&threads[1], NULL, routine, NULL);
-    //TODO figure out why joining threads causes crash when input lvls are high
+//    TODO figure out why joining threads causes crash when input lvls are high
 //    int k;
 //    for (k=0; k<num_threads; k++){
 //        pthread_join(threads[k],NULL);
@@ -123,7 +116,6 @@ void *master(){
     args.name = NULL; /* thread name */
     args.group = NULL; /* thread group */
     (*jvm)->AttachCurrentThread(jvm,&masterEnv,&args);
-
 //    for(;;){
 //        LOGD("master is running");
 //        sleep(1);
@@ -143,7 +135,6 @@ void *master(){
 * ====================================================================
 */
  void *routine(){
-
     /* get a new environment and attach this new thread to jvm */
     JNIEnv* routineEnv;
     JavaVMAttachArgs args;
@@ -155,8 +146,6 @@ void *master(){
     jmethodID mid = (*routineEnv)->GetMethodID(routineEnv, cls, "jniReturn", "(I)V");
     jmethodID construct = (*routineEnv)->GetMethodID(routineEnv,cls,"<init>","()V");
     jobject obj = (*routineEnv)->NewObject(routineEnv, cls, construct);
-
-
     /* initialization of vars */
     struct pollfd pfd[num_buttons];
     int fds[num_buttons];
@@ -165,10 +154,9 @@ void *master(){
     for (i = 0; i < num_buttons ; i++){
         sprintf(gpioValLocations[i], "/sys/class/gpio/gpio%d/value", gpios[i]);
     }
-    /* using sizeof(char) + 1 = 2 as input is a 1 or 0*/
+    /* both of these array are meant to hold 1 char either "1" or "0" */
     char buffers[num_buttons][2];
     char prev_buffers[num_buttons][2];
-
     /* open file descriptors */
     for (i = 0; i < num_buttons; i++){
         if ((fds[i]= open(gpioValLocations[i],O_RDONLY)) < 0) {
@@ -180,12 +168,10 @@ void *master(){
         lseek(fds[i], 0, SEEK_SET); /* consume any prior interrupts*/
         read(fds[i], buffers[i], sizeof buffers[i]);
     }
-
     //TODO change POLLIN to POLLPRI if device has functional sysfs gpio interface
     //TODO if POLLPRI: change 3rd arg of poll() to -1
     for (;;) {
         poll(pfd, num_buttons, 1);
-
         /* wait for interrupt */
         for(i=0; i < num_buttons; i++){
             if ((pfd[i].revents & POLLIN)) {
@@ -197,14 +183,15 @@ void *master(){
                 if (atoi(prev_buffers[i]) != atoi(buffers[i])) {
                     // place fn call here
                     if (first_press == true){
+                        // TODO first_press must be a bool array (one for each button)
+                        // TODO we need a thread array of single and long press
                         first_press = false;
                         //spawn two threads here
                         pthread_create(&threads[2], NULL, single_press, NULL);
                         pthread_create(&threads[3], NULL, long_press, NULL);
-
                     }else if(atoi(buffers[i]) == 1){
                         // output double tap
-                        first_press = true; /* reset the press indicator */
+//                        first_press = true; /* reset the press indicator */
                     }
                     LOGD("change detected");
                 }
@@ -228,7 +215,6 @@ void *single_press(){
     args.name = NULL; /* thread name */
     args.group = NULL; /* thread group */
     (*jvm)->AttachCurrentThread(jvm,&singleEnv,&args);
-
 //    for(;;){
 //        LOGD("single is running");
 //        sleep(1);
@@ -253,7 +239,6 @@ void *long_press(){
     pthread_exit(NULL);
 };
 
-
 /**
  * ====================================================================
  * setup_gpios fn: calls fns that export the desired gpios and sets
@@ -263,10 +248,11 @@ void *long_press(){
  * ====================================================================
  */
 void setup_gpios(){
-    gpio_export(gpio1);
-    gpio_export(gpio2);
-    set_edge(gpio1,3);
-    set_edge(gpio2,3);
+    int k;
+    for (k=0; k<num_buttons; k++){
+        gpio_export(gpios[k]);
+        set_edge(gpios[k],3);
+    }
 }
 
 /**

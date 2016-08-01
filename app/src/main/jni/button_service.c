@@ -1,11 +1,7 @@
 /**
 * ====================================================================
-* rotary-encoder-service.c:
-*   Used to receive interrupts on GPIO using poll() and handle
-*   the interrupt with a finite state machine in order to
-*   determine the direction of rotation of the encoder.
-*   Each change of state triggers a call to fsm.
-*   Therefore, to use detents, place desired fn call by fsm call.
+* button_service.c:
+*
 * ====================================================================
 * IMPORTANT NOTE:
 *   This code assumes that gpio pins have been exported
@@ -15,16 +11,13 @@
 *   "echo in >/sys/class/gpio/gpioXX/direction"
 *   "echo both >/sys/class/gpio/gpioXX/edge"
 *
-*   "echo YY  >/sys/class/gpio/export"
-*   "echo in >/sys/class/gpio/gpioYY/direction"
-*   "echo both >/sys/class/gpio/gpioYY/edge"
-*
 * ====================================================================
-* author(s): Stephan Greto-McGrath (with a couple lines from SO)
+* author(s): Stephan Greto-McGrath
 * ====================================================================
 */
 #include <errno.h>
 #include <jni.h>
+#include <sys/time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <fcntl.h>
@@ -45,21 +38,29 @@ static const int gpio1 = 2;
 static const int gpio2 = 21;
 static const int num_buttons = 2;
 static const int gpios[2] = {2,21};
-static const int num_threads = 2;
 
+/* create a thread array */
+pthread_t threads[4];
 
+/* function declarations */
 int fsm(int previousState, int currentState);
 int concantenate(int x, int y);
 void get_direction(char buf1[8], char buf2[8], JNIEnv *env, jobject obj,jmethodID mid);
 void *master();
 void *routine();
+void *single_press();
+void *long_press();
 void setup_gpios();
 static int gpio_export(int pin);
 static int set_edge(int pin, int edge);
+
+/* define a bool */
 typedef enum {
     false,
     true
 }bool;
+
+bool first_press = true; /* indicates a press in not yet a double tap */
 
 /**
  * stateA is initial state
@@ -73,20 +74,16 @@ enum {
     stateC = 11,
     stateD = 10
 };
-bool sentinel = true;   /* indicates 1st run -> get initial (previous) state */
-                        /* if state is invalid sentinel = true i.e restart */
-bool first_run = true;
-bool first_press = true; /* indicates a press in not yet a double tap */
-int currentState;
-int previousState;
+
 /* cache jvm stuff to be used in thread */
 static JavaVM *jvm;
 static jclass cls;
+
 /**
 * ====================================================================
 * startRoutine fn:
 *   Called by Java to begin routine. Caches JVM to be used later in
-*   the pthread that it spawns. FindClass() has trouble in new thread,
+*   the pthreads that it spawns. FindClass() has trouble in new thread,
 *   therefore class is also cached and made a global ref.
 * ====================================================================
 * authors(s): Stephan Greto-McGrath
@@ -109,7 +106,6 @@ Java_com_google_hal_buttonservice_ButtonService_startRoutine(JNIEnv *env, jclass
     /* cls is made a global to be used in the spawned thread*/
     cls = (jclass)(*env)->NewGlobalRef(env,type);
 
-    pthread_t threads[num_threads];
     pthread_create(&threads[0], NULL, master, NULL);
     pthread_create(&threads[1], NULL, routine, NULL);
     //TODO figure out why joining threads causes crash when input lvls are high
@@ -141,8 +137,7 @@ void *master(){
 * routine fn:
 *   Configures poll(), sets up infinite loop to run on new thread
 *   in jvm and then uses poll() to determine if a change has
-*   taken place on a gpio pin. If it has, it calls get_direction
-*   to determine which way the encoder was turned.
+*   taken place on a gpio pin.
 * ====================================================================
 * authors(s): Stephan Greto-McGrath
 * ====================================================================
@@ -173,7 +168,6 @@ void *master(){
     /* using sizeof(char) + 1 = 2 as input is a 1 or 0*/
     char buffers[num_buttons][2];
     char prev_buffers[num_buttons][2];
-    char temp_buffers[num_buttons][2];
 
     /* open file descriptors */
     for (i = 0; i < num_buttons; i++){
@@ -199,8 +193,19 @@ void *master(){
                 memcpy(prev_buffers[i], buffers[i],2);
                 /* read new values */
                 if (lseek(fds[i], 0, SEEK_SET) == -1) goto houstonWeHaveAProblem; /* one little goto is not the end of the world, please remain calm */
-                if (read(fds[i], buffers[i], sizeof buffers[i]) == -1) goto houstonWeHaveAProblem;
+                if (read(fds[i], buffers[i], sizeof buffers[i]) == -1) goto houstonWeHaveAProblem; /* world's over... */
                 if (atoi(prev_buffers[i]) != atoi(buffers[i])) {
+                    // place fn call here
+                    if (first_press == true){
+                        first_press = false;
+                        //spawn two threads here
+                        pthread_create(&threads[2], NULL, single_press, NULL);
+                        pthread_create(&threads[3], NULL, long_press, NULL);
+
+                    }else if(atoi(buffers[i]) == 1){
+                        // output double tap
+                        first_press = true; /* reset the press indicator */
+                    }
                     LOGD("change detected");
                 }
             }
@@ -216,122 +221,38 @@ void *master(){
     pthread_exit(NULL);
  }
 
-/**
-* ====================================================================
-* get_direction fn:
-*   assigns state based on sentinel var and calls the fsm to determine
-*   direction
-* ====================================================================
-* authors(s): Stephan Greto-McGrath
-* ====================================================================
-*/
-void get_direction(char buf1[8], char buf2[8], JNIEnv *routineEnv, jobject obj, jmethodID mid){
-    if (sentinel != true) {  /* we already have a prev state */
-        previousState = currentState;
-        currentState = concantenate(atoi(buf1), atoi(buf2));
-        /* In case poll returns constantly, this statement below
-         * ensures that we only consider a change in state.
-         * Unnecessary if poll() is working properly with interrupts
-         */
-        if (previousState != currentState) {
-            int direction = fsm(currentState, previousState);
-            LOGD("direction: %d\n", direction);
-            (*routineEnv)->CallVoidMethod(routineEnv, obj, mid, (jint)direction); /* call back to java */
-                                                                    /* act on state change */
-        }
-    } else { /* just starting -> need prev state */
+void *single_press(){
+    JNIEnv* singleEnv;
+    JavaVMAttachArgs args;
+    args.version = JNI_VERSION_1_6; /* JNI version */
+    args.name = NULL; /* thread name */
+    args.group = NULL; /* thread group */
+    (*jvm)->AttachCurrentThread(jvm,&singleEnv,&args);
 
-        currentState = concantenate(atoi(buf1), atoi(buf2));
-        sentinel = false;
-    }
-}
+//    for(;;){
+//        LOGD("single is running");
+//        sleep(1);
+//    }
+    (*jvm)->DetachCurrentThread(jvm);
+    pthread_exit(NULL);
+};
 
-/**
-* ====================================================================
-* fsm fn:
-*     Finite State Machine to decode the output of a
-*     rotary encoder implemented as a pulldown switch
-* ====================================================================
-* Details:
-*
-* Rotary Encoder Output: cw 1, ccw 0, invalid -1
-* How it works:
-*     CW  ---->
-*     CCW <----
-*
-*          +-----+     +-----+     +-----+
-* Ch X     |     |     |     |     |     |
-*       ---+     +-----+     +-----+     +-----
-*
-*             +-----+     +-----+     +-----+
-* Ch Y        |     |     |     |     |     |
-*       ------+     +-----+     +-----+     +-----
-*
-*       ^  ^  ^  ^  ^  ^  ^  ^  ^  ^  ^  ^  ^
-* X    0| 1| 1| 0| 0| 1| 1| 0| 0| 1| 1| 0| 0|
-* Y    0| 0| 1| 1| 0| 0| 1| 1| 0| 0| 1| 1| 0|
-*
-*     State: XY
-*     ccw  prev.  cw    ccw  prev.  cw
-*     01 <- 00 -> 10    B  <- A ->  D
-*     11 <- 01 -> 00    C  <- B ->  A
-*     10 <- 11 -> 01    D  <- C ->  B
-*     00 <- 10 -> 11    A  <- D ->  C
-*
-*     All state transitions not defined are invalid
-* ====================================================================
-* author(s):  Stephan Greto-McGrath
-* ====================================================================
-*/
-int fsm(int previousState, int currentState) {
-    int direction;
-    switch (previousState) {
-        case stateA:
-            if (currentState == stateD) {
-                direction = 1; /* cw */
-            } else if (currentState == stateB) {
-                direction = 0; /* ccw */
-            } else {
-                direction = -1; /* not a valid state */
-                sentinel = true; /* restart state machine */
-            }
-            break;
-        case stateB:
-            if (currentState == stateA) {
-                direction = 1; /* cw */
-            } else if (currentState == stateC) {
-                direction = 0; /* ccw */
-            } else {
-                direction = -1; /* not a valid state */
-                sentinel = true; /* restart state machine */
-            }
-            break;
-        case stateC:
-            if (currentState == stateB) {
-                direction = 1; /* cw */
-            } else if (currentState == stateD) {
-                direction = 0; /* ccw */
-            } else {
-                direction = -1; /* not a valid state */
-                sentinel = true; /* restart state machine */
-            }
-            break;
-        case stateD:
-            if (currentState == stateC) {
-                direction = 1; /* cw */
-            } else if (currentState == stateA) {
-                direction = 0; /* ccw */
-            } else {
-                direction = -1; /* not a valid state */
-                sentinel = true; /* restart state machine */
-            }
-            break;
-        default:
-            direction = -1; /* not a valid state */
-            sentinel = true; /* restart state machine */
-    }
-    return direction;
-}
+void *long_press(){
+    JNIEnv* longEnv;
+    JavaVMAttachArgs args;
+    args.version = JNI_VERSION_1_6; /* JNI version */
+    args.name = NULL; /* thread name */
+    args.group = NULL; /* thread group */
+    (*jvm)->AttachCurrentThread(jvm,&longEnv,&args);
+// run a timer and if not killed by single press then o/p long press
+//    for(;;){
+//        LOGD("long is running");
+//        sleep(1);
+//    }
+    (*jvm)->DetachCurrentThread(jvm);
+    pthread_exit(NULL);
+};
+
 
 /**
  * ====================================================================
@@ -416,20 +337,6 @@ static int set_edge(int pin, int edge){
     }
     close(fd);
     return(0);
-}
-
-/**
-* ====================================================================
-* concantenate fn: (int x, int y) -> int xy
-* ====================================================================
-* authors(s): Tavis Bohne (stackoverflow.com/a/12700533/3885972)
-* ====================================================================
-*/
-int concantenate(int x, int y) {
-    int pow = 10;
-    while (y >= pow)
-        pow *= 10;
-    return x * pow + y;
 }
 
 

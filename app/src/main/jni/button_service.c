@@ -11,6 +11,8 @@
 *   "echo in >/sys/class/gpio/gpioXX/direction"
 *   "echo both >/sys/class/gpio/gpioXX/edge"
 *
+*   It also assumes that gpio pin values are initially 0
+*
 * ====================================================================
 * author(s): Stephan Greto-McGrath
 * ====================================================================
@@ -38,6 +40,10 @@ static const int gpios[2] = {2,21};
 static const int num_buttons = 2; /* num of buttons should correspond to num of gpios*/
 /* create a thread array */
 pthread_t threads[4];
+/* master and routine threads */
+pthread_t run_threads[2];
+/* single_press and long_press threads for each button */
+pthread_t button_threads[2][2]; /* button_threads[i][2] where i = num_buttons */
 /* gpio configuration functions */
 void setup_gpios();
 static int gpio_export(int pin);
@@ -45,29 +51,15 @@ static int set_edge(int pin, int edge);
 /* threads */
 void *master();
 void *routine();
-void *single_press();
-void *long_press();
+void *single_press(void *i);
+void *long_press(void *i);
 /* define a bool */
 typedef enum {
     false,
     true
 }bool;
-
-bool first_press = true; /* indicates a press in not yet a double tap */
-
-/**
- * stateA is initial state
- * stateB is a single press
- * stateC is a double-tap
- * stateD is a long single press
- */
-enum {
-    stateA = 00,
-    stateB = 01,
-    stateC = 11,
-    stateD = 10
-};
-
+/* indicates a press in not yet a double tap */
+bool first_press[2]; /* size must match number of buttons */
 /* cache jvm stuff to be used in thread */
 static JavaVM *jvm;
 static jclass cls;
@@ -84,9 +76,12 @@ static jclass cls;
 */
 JNIEXPORT jint JNICALL
 Java_com_google_hal_buttonservice_ButtonService_startRoutine(JNIEnv *env, jclass type) {
-
     LOGD("function begins");
-
+    /* set all sentinel vars (first_press) to be true */
+    int k;
+    for (k=0; k< num_buttons; k++){
+        first_press[k] = true;
+    }
 // TODO get system priviledges so it can set itself up
 //    setup_gpios(gpio1, gpio2);
 
@@ -99,8 +94,8 @@ Java_com_google_hal_buttonservice_ButtonService_startRoutine(JNIEnv *env, jclass
     /* cls is made a global to be used in the spawned thread*/
     cls = (jclass)(*env)->NewGlobalRef(env,type);
     /* create the threads */
-    pthread_create(&threads[0], NULL, master, NULL);
-    pthread_create(&threads[1], NULL, routine, NULL);
+    pthread_create(&run_threads[0], NULL, master, NULL);
+    pthread_create(&run_threads[1], NULL, routine, NULL);
 //    TODO figure out why joining threads causes crash when input lvls are high
 //    int k;
 //    for (k=0; k<num_threads; k++){
@@ -170,6 +165,7 @@ void *master(){
     }
     //TODO change POLLIN to POLLPRI if device has functional sysfs gpio interface
     //TODO if POLLPRI: change 3rd arg of poll() to -1
+    int button_ids[num_buttons];
     for (;;) {
         poll(pfd, num_buttons, 1);
         /* wait for interrupt */
@@ -181,17 +177,16 @@ void *master(){
                 if (lseek(fds[i], 0, SEEK_SET) == -1) goto houstonWeHaveAProblem; /* one little goto is not the end of the world, please remain calm */
                 if (read(fds[i], buffers[i], sizeof buffers[i]) == -1) goto houstonWeHaveAProblem; /* world's over... */
                 if (atoi(prev_buffers[i]) != atoi(buffers[i])) {
-                    // place fn call here
-                    if (first_press == true){
-                        // TODO first_press must be a bool array (one for each button)
-                        // TODO we need a thread array of single and long press
-                        first_press = false;
-                        //spawn two threads here
-                        pthread_create(&threads[2], NULL, single_press, NULL);
-                        pthread_create(&threads[3], NULL, long_press, NULL);
+                    button_ids[i]=i;
+                    if (first_press[i] == true){
+                        // TODO pass button number to threads so they can o/p what button is pressed
+                        first_press[i] = false;
+                        /* each button hit requires a single_press and long_press thread */
+                        pthread_create(&button_threads[i][0], NULL, single_press, &button_ids[i]);
+                        pthread_create(&button_threads[i][1], NULL, long_press, &button_ids[i]);
                     }else if(atoi(buffers[i]) == 1){
-                        // output double tap
-//                        first_press = true; /* reset the press indicator */
+//                        LOGD("Double-Tap");
+//                        first_press[i] = true; /* reset the press indicator */
                     }
                     LOGD("change detected");
                 }
@@ -208,33 +203,33 @@ void *master(){
     pthread_exit(NULL);
  }
 
-void *single_press(){
+void *single_press(void *i){
     JNIEnv* singleEnv;
     JavaVMAttachArgs args;
     args.version = JNI_VERSION_1_6; /* JNI version */
     args.name = NULL; /* thread name */
     args.group = NULL; /* thread group */
     (*jvm)->AttachCurrentThread(jvm,&singleEnv,&args);
-//    for(;;){
-//        LOGD("single is running");
-//        sleep(1);
-//    }
+    int button_id = *((int *) i);
+
+    LOGD("single %d is running", button_id);
+
     (*jvm)->DetachCurrentThread(jvm);
     pthread_exit(NULL);
 };
 
-void *long_press(){
+void *long_press(void *i){
     JNIEnv* longEnv;
     JavaVMAttachArgs args;
     args.version = JNI_VERSION_1_6; /* JNI version */
     args.name = NULL; /* thread name */
     args.group = NULL; /* thread group */
     (*jvm)->AttachCurrentThread(jvm,&longEnv,&args);
+    int button_id = *((int *) i);
 // run a timer and if not killed by single press then o/p long press
-//    for(;;){
-//        LOGD("long is running");
-//        sleep(1);
-//    }
+
+    LOGD("long %d is running", button_id);
+
     (*jvm)->DetachCurrentThread(jvm);
     pthread_exit(NULL);
 };

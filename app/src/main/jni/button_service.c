@@ -58,8 +58,20 @@ typedef enum {
     false,
     true
 }bool;
+static const int long_press_time = 5;
 /* indicates a press in not yet a double tap */
 bool first_press[2]; /* size must match number of buttons */
+/* for use in taking the difference in times */
+struct timeval beforeX;
+struct timeval afterX;
+struct timeval beforeY;
+struct timeval afterY;
+/* double used to have actual time when adding timeval.tv_sec + timeval.tv_usec
+ * then take difference t2-t1 to find actual time */
+double t1_long;
+double t2_long;
+double t1Y;
+double t2Y;
 /* cache jvm stuff to be used in thread */
 static JavaVM *jvm;
 static jclass cls;
@@ -146,6 +158,7 @@ void *master(){
     int fds[num_buttons];
     const char gpioValLocations[num_buttons][256];
     int i, j;
+    /* set the locations to correspond to the chosen pins */
     for (i = 0; i < num_buttons ; i++){
         sprintf(gpioValLocations[i], "/sys/class/gpio/gpio%d/value", gpios[i]);
     }
@@ -163,9 +176,9 @@ void *master(){
         lseek(fds[i], 0, SEEK_SET); /* consume any prior interrupts*/
         read(fds[i], buffers[i], sizeof buffers[i]);
     }
+    int button_ids[num_buttons]; /* threads must know which button they service */
     //TODO change POLLIN to POLLPRI if device has functional sysfs gpio interface
     //TODO if POLLPRI: change 3rd arg of poll() to -1
-    int button_ids[num_buttons];
     for (;;) {
         poll(pfd, num_buttons, 1);
         /* wait for interrupt */
@@ -177,9 +190,8 @@ void *master(){
                 if (lseek(fds[i], 0, SEEK_SET) == -1) goto houstonWeHaveAProblem; /* one little goto is not the end of the world, please remain calm */
                 if (read(fds[i], buffers[i], sizeof buffers[i]) == -1) goto houstonWeHaveAProblem; /* world's over... */
                 if (atoi(prev_buffers[i]) != atoi(buffers[i])) {
-                    button_ids[i]=i;
+                    button_ids[i]=i; //TODO check if this is too sketchy to have here
                     if (first_press[i] == true){
-                        // TODO pass button number to threads so they can o/p what button is pressed
                         first_press[i] = false;
                         /* each button hit requires a single_press and long_press thread */
                         pthread_create(&button_threads[i][0], NULL, single_press, &button_ids[i]);
@@ -211,8 +223,10 @@ void *single_press(void *i){
     args.group = NULL; /* thread group */
     (*jvm)->AttachCurrentThread(jvm,&singleEnv,&args);
     int button_id = *((int *) i);
+    // if single press is o/p reset first_press[i]
 
     LOGD("single %d is running", button_id);
+
 
     (*jvm)->DetachCurrentThread(jvm);
     pthread_exit(NULL);
@@ -225,10 +239,24 @@ void *long_press(void *i){
     args.name = NULL; /* thread name */
     args.group = NULL; /* thread group */
     (*jvm)->AttachCurrentThread(jvm,&longEnv,&args);
+    gettimeofday(&beforeX,NULL);
+    t1_long = beforeX.tv_sec + beforeX.tv_usec;
     int button_id = *((int *) i);
-// run a timer and if not killed by single press then o/p long press
-
     LOGD("long %d is running", button_id);
+// run a timer and if not killed then o/p long press
+    while(1){
+        gettimeofday(&afterX,NULL);
+        t2_long = afterX.tv_sec + afterX.tv_usec;
+        /* if key is held down for more than set time - long press */
+        if ((t2_long-t1_long) > long_press_time){
+            // output long-press
+            LOGD("t1 is: %f", t1_long);
+            LOGD("t2 is: %f", t2_long);
+            LOGD("diff is: %f", (t2_long-t1_long));
+            LOGD("long-press detected on %d", button_id);
+            break;
+        }
+    }
 
     (*jvm)->DetachCurrentThread(jvm);
     pthread_exit(NULL);

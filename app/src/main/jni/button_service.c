@@ -28,6 +28,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <android/log.h>
+#include <time.h>
+#define BILLION 1000000000L
 #define LOG_TAG "GPIO"
 #ifndef EXEC
 #define  LOGD(...)  __android_log_print(ANDROID_LOG_DEBUG,LOG_TAG,__VA_ARGS__)
@@ -66,6 +68,11 @@ struct timeval beforeX;
 struct timeval afterX;
 struct timeval beforeY;
 struct timeval afterY;
+
+struct timespec startX;
+struct timespec endX;
+struct timespec startY;
+struct timespec endY;
 /* double used to have actual time when adding timeval.tv_sec + timeval.tv_usec
  * then take difference t2-t1 to find actual time */
 double t1_long;
@@ -190,7 +197,7 @@ void *master(){
                 if (lseek(fds[i], 0, SEEK_SET) == -1) goto houstonWeHaveAProblem; /* one little goto is not the end of the world, please remain calm */
                 if (read(fds[i], buffers[i], sizeof buffers[i]) == -1) goto houstonWeHaveAProblem; /* world's over... */
                 if (atoi(prev_buffers[i]) != atoi(buffers[i])) {
-                    button_ids[i]=i; //TODO check if this is too sketchy to have here
+                    button_ids[i]=i; //TODO check if this is too sketchy to have here!!!!!
                     if (first_press[i] == true){
                         first_press[i] = false;
                         /* each button hit requires a single_press and long_press thread */
@@ -233,31 +240,28 @@ void *single_press(void *i){
 };
 
 void *long_press(void *i){
+    unsigned long long diff;
     JNIEnv* longEnv;
     JavaVMAttachArgs args;
     args.version = JNI_VERSION_1_6; /* JNI version */
     args.name = NULL; /* thread name */
     args.group = NULL; /* thread group */
     (*jvm)->AttachCurrentThread(jvm,&longEnv,&args);
-    gettimeofday(&beforeX,NULL);
-    t1_long = beforeX.tv_sec + beforeX.tv_usec;
+    clock_gettime(CLOCK_MONOTONIC,&startX); /* get start time */
     int button_id = *((int *) i);
     LOGD("long %d is running", button_id);
-// run a timer and if not killed then o/p long press
+    /* timer to detect long press if thread isn't killed by short or double-tap*/
     while(1){
-        gettimeofday(&afterX,NULL);
-        t2_long = afterX.tv_sec + afterX.tv_usec;
+        clock_gettime(CLOCK_MONOTONIC, &endX); /* keep getting time to check */
+        diff = BILLION * (endX.tv_sec - startX.tv_sec) + (endX.tv_nsec - startX.tv_nsec); /* check elapsed time */
         /* if key is held down for more than set time - long press */
-        if ((t2_long-t1_long) > long_press_time){
+        LOGD("diff is: %llu", diff);
+        if ((diff) > 100000000){
             // output long-press
-            LOGD("t1 is: %f", t1_long);
-            LOGD("t2 is: %f", t2_long);
-            LOGD("diff is: %f", (t2_long-t1_long));
             LOGD("long-press detected on %d", button_id);
             break;
         }
     }
-
     (*jvm)->DetachCurrentThread(jvm);
     pthread_exit(NULL);
 };

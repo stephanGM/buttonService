@@ -60,25 +60,14 @@ typedef enum {
     false,
     true
 }bool;
-static const int long_press_time = 5;
 /* indicates a press in not yet a double tap */
 bool first_press[2]; /* size must match number of buttons */
+bool button_down[2];
 /* for use in taking the difference in times */
-struct timeval beforeX;
-struct timeval afterX;
-struct timeval beforeY;
-struct timeval afterY;
-
 struct timespec startX;
 struct timespec endX;
 struct timespec startY;
 struct timespec endY;
-/* double used to have actual time when adding timeval.tv_sec + timeval.tv_usec
- * then take difference t2-t1 to find actual time */
-double t1_long;
-double t2_long;
-double t1Y;
-double t2Y;
 /* cache jvm stuff to be used in thread */
 static JavaVM *jvm;
 static jclass cls;
@@ -200,14 +189,19 @@ void *master(){
                     button_ids[i]=i; //TODO check if this is too sketchy to have here!!!!!
                     if (first_press[i] == true){
                         first_press[i] = false;
+                        button_down[i] = true;
                         /* each button hit requires a single_press and long_press thread */
                         pthread_create(&button_threads[i][0], NULL, single_press, &button_ids[i]);
                         pthread_create(&button_threads[i][1], NULL, long_press, &button_ids[i]);
                     }else if(atoi(buffers[i]) == 1){
-//                        LOGD("Double-Tap");
-//                        first_press[i] = true; /* reset the press indicator */
+                        button_down[i] = true;
+                        LOGD("Double-Tap");
+                        first_press[i] = true; /* reset the press indicator, let's all [i] threads know to exit as well */
+                    }else if(atoi(buffers[i]) == 0){
+                        button_down[i] = false;
+
                     }
-                    LOGD("change detected");
+//                    LOGD("change detected");
                 }
             }
         }
@@ -223,18 +217,30 @@ void *master(){
  }
 
 void *single_press(void *i){
+    unsigned long long diff;
     JNIEnv* singleEnv;
     JavaVMAttachArgs args;
     args.version = JNI_VERSION_1_6; /* JNI version */
     args.name = NULL; /* thread name */
     args.group = NULL; /* thread group */
     (*jvm)->AttachCurrentThread(jvm,&singleEnv,&args);
-    int button_id = *((int *) i);
     // if single press is o/p reset first_press[i]
-
-    LOGD("single %d is running", button_id);
-
-
+    clock_gettime(CLOCK_MONOTONIC,&startY); /* get start time */
+    int button_id = *((int *) i);
+//    LOGD("single-press %d is running", button_id);
+    /* timer to detect long press if thread isn't killed by short or double-tap*/
+    while(1){
+        // TODO not detecting next value is 0
+        if (first_press[button_id]== true)break; /* checks to see no reset from another thread */
+        clock_gettime(CLOCK_MONOTONIC, &endX); /* keep getting time to check */
+        diff = BILLION * (endY.tv_sec - startY.tv_sec) + (endY.tv_nsec - startY.tv_nsec); /* check elapsed time */
+        /* if Y seconds pass before another interrupt is received then we assume it to be a single press */
+        if ((diff > 50000000) && (button_down[button_id] == false)){
+            LOGD("single-press detected on %d", button_id);
+            break;
+        }
+    }
+    first_press[button_id] = true; /* reset the button to be pushed again*/
     (*jvm)->DetachCurrentThread(jvm);
     pthread_exit(NULL);
 };
@@ -249,19 +255,19 @@ void *long_press(void *i){
     (*jvm)->AttachCurrentThread(jvm,&longEnv,&args);
     clock_gettime(CLOCK_MONOTONIC,&startX); /* get start time */
     int button_id = *((int *) i);
-    LOGD("long %d is running", button_id);
+//    LOGD("long %d is running", button_id);
     /* timer to detect long press if thread isn't killed by short or double-tap*/
     while(1){
+        if (first_press[button_id]== true)break; /* checks to see no reset from another thread */
         clock_gettime(CLOCK_MONOTONIC, &endX); /* keep getting time to check */
         diff = BILLION * (endX.tv_sec - startX.tv_sec) + (endX.tv_nsec - startX.tv_nsec); /* check elapsed time */
-        /* if key is held down for more than set time - long press */
-        LOGD("diff is: %llu", diff);
-        if ((diff) > 100000000){
-            // output long-press
+        /* if key is held down (i.e. no interrupt) for more than set time we assume long press */
+        if ((diff > 1000000000) && (button_down[button_id] == true)){
             LOGD("long-press detected on %d", button_id);
             break;
         }
     }
+    first_press[button_id] = true; /* reset the button to be pushed again*/
     (*jvm)->DetachCurrentThread(jvm);
     pthread_exit(NULL);
 };

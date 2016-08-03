@@ -1,3 +1,5 @@
+//TODO make sure first_press[i] and button_down[i] are thread safe
+
 /**
 * ====================================================================
 * button_service.c:
@@ -30,6 +32,8 @@
 #include <android/log.h>
 #include <time.h>
 #define BILLION 1000000000L
+#define SHORT_PRESS 500000000
+#define LONG_PRESS 1500000000
 #define LOG_TAG "GPIO"
 #ifndef EXEC
 #define  LOGD(...)  __android_log_print(ANDROID_LOG_DEBUG,LOG_TAG,__VA_ARGS__)
@@ -40,21 +44,16 @@
 /* define the GPIO pins to be used!!!! */
 static const int gpios[2] = {2,21};
 static const int num_buttons = 2; /* num of buttons should correspond to num of gpios*/
-/* create a thread array */
-pthread_t threads[4];
-/* master and routine threads */
-pthread_t run_threads[2];
-/* single_press and long_press threads for each button */
-pthread_t button_threads[2][2]; /* button_threads[i][2] where i = num_buttons */
 /* gpio configuration functions */
 void setup_gpios();
 static int gpio_export(int pin);
 static int set_edge(int pin, int edge);
+/* helper functions */
+int read_n_check(int i, int fd);
+void clock_start();
+unsigned long long clock_check();
 /* threads */
-void *master();
 void *routine();
-void *single_press(void *i);
-void *long_press(void *i);
 /* define a bool */
 typedef enum {
     false,
@@ -63,11 +62,12 @@ typedef enum {
 /* indicates a press in not yet a double tap */
 bool first_press[2]; /* size must match number of buttons */
 bool button_down[2];
+/* both of these array are meant to hold 1 char either "1" or "0" */
+char buffers[2][2];
+char prev_buffers[2][2];
 /* for use in taking the difference in times */
-struct timespec startX;
-struct timespec endX;
-struct timespec startY;
-struct timespec endY;
+struct timespec start;
+struct timespec end;
 /* cache jvm stuff to be used in thread */
 static JavaVM *jvm;
 static jclass cls;
@@ -99,33 +99,14 @@ Java_com_google_hal_buttonservice_ButtonService_startRoutine(JNIEnv *env, jclass
         LOGD("failed to retrieve *env");
         exit(1);
     }
+    pthread_t run;
     /* cls is made a global to be used in the spawned thread*/
     cls = (jclass)(*env)->NewGlobalRef(env,type);
     /* create the threads */
-    pthread_create(&run_threads[0], NULL, master, NULL);
-    pthread_create(&run_threads[1], NULL, routine, NULL);
+    pthread_create(&run, NULL, routine, NULL);
 //    TODO figure out why joining threads causes crash when input lvls are high
-//    int k;
-//    for (k=0; k<num_threads; k++){
-//        pthread_join(threads[k],NULL);
-//    }
 }
 
-void *master(){
-    /* get a new environment and attach this new thread to jvm */
-    JNIEnv* masterEnv;
-    JavaVMAttachArgs args;
-    args.version = JNI_VERSION_1_6; /* JNI version */
-    args.name = NULL; /* thread name */
-    args.group = NULL; /* thread group */
-    (*jvm)->AttachCurrentThread(jvm,&masterEnv,&args);
-//    for(;;){
-//        LOGD("master is running");
-//        sleep(1);
-//    }
-    (*jvm)->DetachCurrentThread(jvm);
-    pthread_exit(NULL);
-}
 
 /**
 * ====================================================================
@@ -141,26 +122,25 @@ void *master(){
     /* get a new environment and attach this new thread to jvm */
     JNIEnv* routineEnv;
     JavaVMAttachArgs args;
-    args.version = JNI_VERSION_1_6; /* JNI version */
-    args.name = NULL; /* thread name */
-    args.group = NULL; /* thread group */
+    args.version = JNI_VERSION_1_6;
+    args.name = NULL;
+    args.group = NULL;
     (*jvm)->AttachCurrentThread(jvm,&routineEnv,&args);
     /* get method ID to call back to Java */
     jmethodID mid = (*routineEnv)->GetMethodID(routineEnv, cls, "jniReturn", "(I)V");
     jmethodID construct = (*routineEnv)->GetMethodID(routineEnv,cls,"<init>","()V");
     jobject obj = (*routineEnv)->NewObject(routineEnv, cls, construct);
+
+
     /* initialization of vars */
     struct pollfd pfd[num_buttons];
     int fds[num_buttons];
-    const char gpioValLocations[num_buttons][256];
-    int i, j;
+    char gpioValLocations[num_buttons][256];
+    int i;
     /* set the locations to correspond to the chosen pins */
     for (i = 0; i < num_buttons ; i++){
         sprintf(gpioValLocations[i], "/sys/class/gpio/gpio%d/value", gpios[i]);
     }
-    /* both of these array are meant to hold 1 char either "1" or "0" */
-    char buffers[num_buttons][2];
-    char prev_buffers[num_buttons][2];
     /* open file descriptors */
     for (i = 0; i < num_buttons; i++){
         if ((fds[i]= open(gpioValLocations[i],O_RDONLY)) < 0) {
@@ -172,42 +152,64 @@ void *master(){
         lseek(fds[i], 0, SEEK_SET); /* consume any prior interrupts*/
         read(fds[i], buffers[i], sizeof buffers[i]);
     }
-    int button_ids[num_buttons]; /* threads must know which button they service */
+    unsigned long long diff;
+    int breaker = 0;
+    int new_val = 0;
     //TODO change POLLIN to POLLPRI if device has functional sysfs gpio interface
     //TODO if POLLPRI: change 3rd arg of poll() to -1
     for (;;) {
+        if (breaker == 1) break;
         poll(pfd, num_buttons, 1);
-        /* wait for interrupt */
         for(i=0; i < num_buttons; i++){
             if ((pfd[i].revents & POLLIN)) {
-                /* copy current values to compare to next to detected change */
-                memcpy(prev_buffers[i], buffers[i],2);
-                /* read new values */
-                if (lseek(fds[i], 0, SEEK_SET) == -1) goto houstonWeHaveAProblem; /* one little goto is not the end of the world, please remain calm */
-                if (read(fds[i], buffers[i], sizeof buffers[i]) == -1) goto houstonWeHaveAProblem; /* world's over... */
-                if (atoi(prev_buffers[i]) != atoi(buffers[i])) {
-                    button_ids[i]=i; //TODO check if this is too sketchy to have here!!!!!
-                    if (first_press[i] == true){
-                        first_press[i] = false;
-                        button_down[i] = true;
-                        /* each button hit requires a single_press and long_press thread */
-                        pthread_create(&button_threads[i][0], NULL, single_press, &button_ids[i]);
-                        pthread_create(&button_threads[i][1], NULL, long_press, &button_ids[i]);
-                    }else if(atoi(buffers[i]) == 1){
-                        button_down[i] = true;
-                        LOGD("Double-Tap");
-                        first_press[i] = true; /* reset the press indicator, let's all [i] threads know to exit as well */
-                    }else if(atoi(buffers[i]) == 0){
-                        button_down[i] = false;
+                new_val = read_n_check(i, fds[i]);
+                if ((new_val == 1) && (atoi(buffers[i]) == 1)) { /* button is pressed */
+                    LOGD("change detected");
+                    clock_start();
+                    first_press[i] = false;
+                    while (first_press[i] == false) {
+                        diff = clock_check();
+                        new_val = read_n_check(i, fds[i]);
+                        // todo make sure all up and down presses are broadcast
+                        if ((new_val == 0) && (atoi(buffers[i]) == 1) && (diff > LONG_PRESS)) {
+                            // button has not been lifted
+                            // button is still down
+                            // long press time has elapsed
+                            // broadcast long press
+                            LOGD("long");
+                            // broadcast
+                            first_press[i] = true; /* reset */
+                        }
+                        if ((new_val == 1) && (atoi(buffers[i]) == 0) && (diff < LONG_PRESS)) {
+                            // button has been raised before longpress
+                            // start timer
+                            clock_start();
+                            while (1) {
+                                diff = clock_check();
+                                if ((read_n_check(i, fds[i]) == 1) && (atoi(buffers[i]) == 1) &&
+                                    (diff < SHORT_PRESS)) {
+                                    // ouput double tap
+                                    LOGD("double");
+                                    break;
+                                }
+                                if (diff > SHORT_PRESS) {
+                                    // output single-press
+                                    LOGD("short");
+                                    break;
+                                }
 
+                            }
+                            first_press[i] = true; /* reset */
+                        }
                     }
-//                    LOGD("change detected");
+
+                }else if (new_val == -1) {
+                    breaker = 1;
                 }
             }
         }
     }
     /* shutdown */
-    houstonWeHaveAProblem:
     LOGD("Reading Terminated");
     for (i = 0; i < num_buttons; i++){
         close(fds[i]);
@@ -216,61 +218,28 @@ void *master(){
     pthread_exit(NULL);
  }
 
-void *single_press(void *i){
-    unsigned long long diff;
-    JNIEnv* singleEnv;
-    JavaVMAttachArgs args;
-    args.version = JNI_VERSION_1_6; /* JNI version */
-    args.name = NULL; /* thread name */
-    args.group = NULL; /* thread group */
-    (*jvm)->AttachCurrentThread(jvm,&singleEnv,&args);
-    // if single press is o/p reset first_press[i]
-    clock_gettime(CLOCK_MONOTONIC,&startY); /* get start time */
-    int button_id = *((int *) i);
-//    LOGD("single-press %d is running", button_id);
-    /* timer to detect long press if thread isn't killed by short or double-tap*/
-    while(1){
-        // TODO not detecting next value is 0
-        if (first_press[button_id]== true)break; /* checks to see no reset from another thread */
-        clock_gettime(CLOCK_MONOTONIC, &endX); /* keep getting time to check */
-        diff = BILLION * (endY.tv_sec - startY.tv_sec) + (endY.tv_nsec - startY.tv_nsec); /* check elapsed time */
-        /* if Y seconds pass before another interrupt is received then we assume it to be a single press */
-        if ((diff > 50000000) && (button_down[button_id] == false)){
-            LOGD("single-press detected on %d", button_id);
-            break;
-        }
+int read_n_check(int i, int fd){
+    /* copy current values to compare to next to detected change */
+    memcpy(prev_buffers[i], buffers[i],2);
+    /* read new values */
+    if (lseek(fd, 0, SEEK_SET) == -1) return -1;
+    if (read(fd, buffers[i], sizeof buffers[i]) == -1) return -1;
+    if (atoi(prev_buffers[i]) != atoi(buffers[i])) { /* change is detected from last read value */
+        return 1;
     }
-    first_press[button_id] = true; /* reset the button to be pushed again*/
-    (*jvm)->DetachCurrentThread(jvm);
-    pthread_exit(NULL);
-};
+    return 0;
+}
 
-void *long_press(void *i){
-    unsigned long long diff;
-    JNIEnv* longEnv;
-    JavaVMAttachArgs args;
-    args.version = JNI_VERSION_1_6; /* JNI version */
-    args.name = NULL; /* thread name */
-    args.group = NULL; /* thread group */
-    (*jvm)->AttachCurrentThread(jvm,&longEnv,&args);
-    clock_gettime(CLOCK_MONOTONIC,&startX); /* get start time */
-    int button_id = *((int *) i);
-//    LOGD("long %d is running", button_id);
-    /* timer to detect long press if thread isn't killed by short or double-tap*/
-    while(1){
-        if (first_press[button_id]== true)break; /* checks to see no reset from another thread */
-        clock_gettime(CLOCK_MONOTONIC, &endX); /* keep getting time to check */
-        diff = BILLION * (endX.tv_sec - startX.tv_sec) + (endX.tv_nsec - startX.tv_nsec); /* check elapsed time */
-        /* if key is held down (i.e. no interrupt) for more than set time we assume long press */
-        if ((diff > 1000000000) && (button_down[button_id] == true)){
-            LOGD("long-press detected on %d", button_id);
-            break;
-        }
-    }
-    first_press[button_id] = true; /* reset the button to be pushed again*/
-    (*jvm)->DetachCurrentThread(jvm);
-    pthread_exit(NULL);
-};
+void clock_start(){
+    clock_gettime(CLOCK_MONOTONIC, &start);
+}
+
+unsigned long long clock_check(){
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    return (unsigned long long) BILLION * (end.tv_sec - start.tv_sec) +
+           (end.tv_nsec - start.tv_nsec); /* check elapsed time */
+}
+
 
 /**
  * ====================================================================

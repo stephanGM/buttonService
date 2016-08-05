@@ -9,11 +9,15 @@
 *   This code assumes that gpio pins have been exported
 *   and their edges set like so:
 *
-*   "echo XX  >/sys/class/gpio/export"
-*   "echo in >/sys/class/gpio/gpioXX/direction"
-*   "echo both >/sys/class/gpio/gpioXX/edge"
+*   "echo XX  > /sys/class/gpio/export"
+*   "echo in > /sys/class/gpio/gpioXX/direction"
+*   "echo both > /sys/class/gpio/gpioXX/edge"
 *
 *   It also assumes that gpio pin values are initially 0
+*   Depending on whether the pushbutton is a pullup or pulldown,
+*   active_low can be set to make sure the initial state is 0:
+*
+*   "echo 1 > /sys/class/gpio/gpioXX/active_low"
 *
 * ====================================================================
 * author(s): Stephan Greto-McGrath
@@ -49,7 +53,7 @@ void setup_gpios();
 static int gpio_export(int pin);
 static int set_edge(int pin, int edge);
 /* helper functions */
-int read_n_check(int i, int fd);
+int read_n_check(int i, int fd,JNIEnv *routineEnv, jobject obj, jmethodID mid);
 void clock_start();
 unsigned long long clock_check();
 /* threads */
@@ -162,41 +166,42 @@ Java_com_google_hal_buttonservice_ButtonService_startRoutine(JNIEnv *env, jclass
         poll(pfd, num_buttons, 1);
         for(i=0; i < num_buttons; i++){
             if ((pfd[i].revents & POLLIN)) {
-                new_val = read_n_check(i, fds[i]);
+                new_val = read_n_check(i, fds[i], routineEnv, obj, mid);
+                if (new_val == 1){
+
+                }
                 if ((new_val == 1) && (atoi(buffers[i]) == 1)) { /* button is pressed */
-//                    LOGD("change detected");
+                    // broadcast button down
                     clock_start();
                     first_press[i] = false;
                     while (first_press[i] == false) {
                         diff = clock_check();
-                        new_val = read_n_check(i, fds[i]);
+                        new_val = read_n_check(i, fds[i], routineEnv, obj, mid);
                         // todo make sure all up and down presses are broadcast
                         if ((new_val == 0) && (atoi(buffers[i]) == 1) && (diff > LONG_PRESS)) {
                             // button has not been lifted
                             // button is still down
                             // long press time has elapsed
                             // broadcast long press
-//                            LOGD("long");
-                            // broadcast
                             (*routineEnv)->CallVoidMethod(routineEnv, obj, mid, (jint)1);
                             first_press[i] = true; /* reset */
                         }
                         if ((new_val == 1) && (atoi(buffers[i]) == 0) && (diff < LONG_PRESS)) {
                             // button has been raised before longpress
+                            // broadcast button up
                             // start timer
                             clock_start();
                             while (1) {
                                 diff = clock_check();
-                                if ((read_n_check(i, fds[i]) == 1) && (atoi(buffers[i]) == 1) &&
+                                new_val = read_n_check(i, fds[i], routineEnv, obj, mid);
+                                if ((new_val == 1) && (atoi(buffers[i]) == 1) &&
                                     (diff < SHORT_PRESS)) {
                                     // ouput double tap
-//                                    LOGD("double");
                                     (*routineEnv)->CallVoidMethod(routineEnv, obj, mid, (jint)2);
                                     break;
                                 }
                                 if (diff > SHORT_PRESS) {
                                     // output single-press
-//                                    LOGD("short");
                                     (*routineEnv)->CallVoidMethod(routineEnv, obj, mid, (jint)0);
                                     break;
                                 }
@@ -220,13 +225,31 @@ Java_com_google_hal_buttonservice_ButtonService_startRoutine(JNIEnv *env, jclass
     pthread_exit(NULL);
  }
 
-int read_n_check(int i, int fd){
+/**
+* ====================================================================
+* read_n_check fn:
+*   This function reads the gpio at the given fd into buffers[i]
+*   and compares it to the previous value. If there is a change,
+*   it reports it. It also calls Java to broadcast whether the button
+*   is up or down.
+*   returns:
+*   0: no change    1: change   -1: error reading fd
+* ====================================================================
+* authors(s): Stephan Greto-McGrath
+* ====================================================================
+*/
+int read_n_check(int i, int fd,JNIEnv *routineEnv, jobject obj, jmethodID mid){
     /* copy current values to compare to next to detected change */
     memcpy(prev_buffers[i], buffers[i],2);
     /* read new values */
     if (lseek(fd, 0, SEEK_SET) == -1) return -1;
     if (read(fd, buffers[i], sizeof buffers[i]) == -1) return -1;
     if (atoi(prev_buffers[i]) != atoi(buffers[i])) { /* change is detected from last read value */
+        if (atoi(buffers[i])==1){
+            (*routineEnv)->CallVoidMethod(routineEnv, obj, mid, (jint)3); /* broadcast button down */
+        }else if(atoi(buffers[i])==0){
+            (*routineEnv)->CallVoidMethod(routineEnv, obj, mid, (jint)4); /* broadcast button up */
+        }
         return 1;
     }
     return 0;

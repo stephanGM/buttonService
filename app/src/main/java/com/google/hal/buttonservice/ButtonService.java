@@ -79,12 +79,18 @@ public class ButtonService extends Service {
             case 2:
                 broadcast_action = "DOUBLE";
                 break;
+            case 3:
+                broadcast_action = "BUTTON_DOWN";
+                break;
+            case 4:
+                broadcast_action = "BUTTON_UP";
+                break;
             default:
                 broadcast_action = "INVALID";
                 break;
         }
 //        showToast(broadcast_action);
-//        Log.d(TAG, broadcast_action);
+        Log.d(TAG, broadcast_action);
         if (!broadcast_action.equals("INVALID")){
             broadcastDirection(broadcast_action);
         }

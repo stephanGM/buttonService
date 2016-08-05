@@ -67,23 +67,23 @@ public class ButtonService extends Service {
      * authors(s): Stephan Greto-McGrath
      * ====================================================================
      */
-    public void jniReturn(int action){
+    public void jniReturn(int action, int button){
         String broadcast_action;
         switch(action){
             case 0:
-                broadcast_action = "SHORT";
+                broadcast_action = "SHORT_" + Integer.toString(button);
                 break;
             case 1:
-                broadcast_action = "LONG";
+                broadcast_action = "LONG_" + Integer.toString(button);
                 break;
             case 2:
-                broadcast_action = "DOUBLE";
+                broadcast_action = "DOUBLE_" + Integer.toString(button);
                 break;
             case 3:
-                broadcast_action = "BUTTON_DOWN";
+                broadcast_action = "BUTTON_DOWN_" + Integer.toString(button);
                 break;
             case 4:
-                broadcast_action = "BUTTON_UP";
+                broadcast_action = "BUTTON_UP_" + Integer.toString(button);
                 break;
             default:
                 broadcast_action = "INVALID";

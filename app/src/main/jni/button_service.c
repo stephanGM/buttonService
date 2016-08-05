@@ -131,7 +131,7 @@ Java_com_google_hal_buttonservice_ButtonService_startRoutine(JNIEnv *env, jclass
     args.group = NULL;
     (*jvm)->AttachCurrentThread(jvm,&routineEnv,&args);
     /* get method ID to call back to Java */
-    jmethodID mid = (*routineEnv)->GetMethodID(routineEnv, cls, "jniReturn", "(I)V");
+    jmethodID mid = (*routineEnv)->GetMethodID(routineEnv, cls, "jniReturn", "(II)V");
     jmethodID construct = (*routineEnv)->GetMethodID(routineEnv,cls,"<init>","()V");
     jobject obj = (*routineEnv)->NewObject(routineEnv, cls, construct);
 
@@ -183,7 +183,7 @@ Java_com_google_hal_buttonservice_ButtonService_startRoutine(JNIEnv *env, jclass
                             // button is still down
                             // long press time has elapsed
                             // broadcast long press
-                            (*routineEnv)->CallVoidMethod(routineEnv, obj, mid, (jint)1);
+                            (*routineEnv)->CallVoidMethod(routineEnv, obj, mid, (jint)1, (jint) i);
                             first_press[i] = true; /* reset */
                         }
                         if ((new_val == 1) && (atoi(buffers[i]) == 0) && (diff < LONG_PRESS)) {
@@ -197,12 +197,12 @@ Java_com_google_hal_buttonservice_ButtonService_startRoutine(JNIEnv *env, jclass
                                 if ((new_val == 1) && (atoi(buffers[i]) == 1) &&
                                     (diff < SHORT_PRESS)) {
                                     // ouput double tap
-                                    (*routineEnv)->CallVoidMethod(routineEnv, obj, mid, (jint)2);
+                                    (*routineEnv)->CallVoidMethod(routineEnv, obj, mid, (jint)2, (jint) i);
                                     break;
                                 }
                                 if (diff > SHORT_PRESS) {
                                     // output single-press
-                                    (*routineEnv)->CallVoidMethod(routineEnv, obj, mid, (jint)0);
+                                    (*routineEnv)->CallVoidMethod(routineEnv, obj, mid, (jint)0, (jint) i);
                                     break;
                                 }
                             }
@@ -246,9 +246,9 @@ int read_n_check(int i, int fd,JNIEnv *routineEnv, jobject obj, jmethodID mid){
     if (read(fd, buffers[i], sizeof buffers[i]) == -1) return -1;
     if (atoi(prev_buffers[i]) != atoi(buffers[i])) { /* change is detected from last read value */
         if (atoi(buffers[i])==1){
-            (*routineEnv)->CallVoidMethod(routineEnv, obj, mid, (jint)3); /* broadcast button down */
+            (*routineEnv)->CallVoidMethod(routineEnv, obj, mid, (jint)3, (jint) i); /* broadcast button down */
         }else if(atoi(buffers[i])==0){
-            (*routineEnv)->CallVoidMethod(routineEnv, obj, mid, (jint)4); /* broadcast button up */
+            (*routineEnv)->CallVoidMethod(routineEnv, obj, mid, (jint)4, (jint) i); /* broadcast button up */
         }
         return 1;
     }

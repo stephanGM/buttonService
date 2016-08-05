@@ -164,7 +164,7 @@ Java_com_google_hal_buttonservice_ButtonService_startRoutine(JNIEnv *env, jclass
             if ((pfd[i].revents & POLLIN)) {
                 new_val = read_n_check(i, fds[i]);
                 if ((new_val == 1) && (atoi(buffers[i]) == 1)) { /* button is pressed */
-                    LOGD("change detected");
+//                    LOGD("change detected");
                     clock_start();
                     first_press[i] = false;
                     while (first_press[i] == false) {
@@ -176,8 +176,9 @@ Java_com_google_hal_buttonservice_ButtonService_startRoutine(JNIEnv *env, jclass
                             // button is still down
                             // long press time has elapsed
                             // broadcast long press
-                            LOGD("long");
+//                            LOGD("long");
                             // broadcast
+                            (*routineEnv)->CallVoidMethod(routineEnv, obj, mid, (jint)1);
                             first_press[i] = true; /* reset */
                         }
                         if ((new_val == 1) && (atoi(buffers[i]) == 0) && (diff < LONG_PRESS)) {
@@ -189,15 +190,16 @@ Java_com_google_hal_buttonservice_ButtonService_startRoutine(JNIEnv *env, jclass
                                 if ((read_n_check(i, fds[i]) == 1) && (atoi(buffers[i]) == 1) &&
                                     (diff < SHORT_PRESS)) {
                                     // ouput double tap
-                                    LOGD("double");
+//                                    LOGD("double");
+                                    (*routineEnv)->CallVoidMethod(routineEnv, obj, mid, (jint)2);
                                     break;
                                 }
                                 if (diff > SHORT_PRESS) {
                                     // output single-press
-                                    LOGD("short");
+//                                    LOGD("short");
+                                    (*routineEnv)->CallVoidMethod(routineEnv, obj, mid, (jint)0);
                                     break;
                                 }
-
                             }
                             first_press[i] = true; /* reset */
                         }

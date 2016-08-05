@@ -67,25 +67,35 @@ public class ButtonService extends Service {
      * authors(s): Stephan Greto-McGrath
      * ====================================================================
      */
-    public void jniReturn(int direction){
-        String direc;
-        if (direction == 0){
-            direc = "COUNTER_CLOCKWISE";
-        }else if (direction == 1){
-            direc = "CLOCKWISE";
-        }else{
-            direc = "invalid";
+    public void jniReturn(int action){
+        String broadcast_action;
+        switch(action){
+            case 0:
+                broadcast_action = "SHORT";
+                break;
+            case 1:
+                broadcast_action = "LONG";
+                break;
+            case 2:
+                broadcast_action = "DOUBLE";
+                break;
+            default:
+                broadcast_action = "INVALID";
+                break;
         }
-//        showToast(direc);
-        Log.d(TAG, direc);
-        broadcastDirection(direc);
+//        showToast(broadcast_action);
+//        Log.d(TAG, broadcast_action);
+        if (!broadcast_action.equals("INVALID")){
+            broadcastDirection(broadcast_action);
+        }
+
 
     }
 
 
-    public void broadcastDirection(String direc){
+    public void broadcastDirection(String action){
         Intent i = new Intent();
-        i.setAction("com.google.hal." + direc);
+        i.setAction("com.google.hal." + action);
         MyContext.sendBroadcast(i);
     }
 

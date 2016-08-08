@@ -30,14 +30,15 @@ public class ButtonService extends Service {
         MyContext = getApplicationContext(); /* get the context to use later from JNI */
         Toast.makeText(this, "Pushbutton Interface Running", Toast.LENGTH_SHORT).show();
         Log.d(TAG, "onStart");
-        startRoutine(); /* call the C fn that begins the ISR thread w desired gpio pin #s */
+        startRoutine(); /* call the C fn that begins the ISR thread*/
         return START_STICKY;
     }
 
     /**
      * ====================================================================
      * showToast method:
-     *   Used to display Toast messages using Boast and from worker threads
+     *   Used to display Toast messages using Boast from worker threads
+     *   without jamming up the UI thread.
      * ====================================================================
      * Details:
      *   uses a handler in order to make Toast/Boast possible from worker
@@ -59,10 +60,10 @@ public class ButtonService extends Service {
     // TODO edit this description
     /**
      * ====================================================================
-     * handleStateChange method:
-     *   will call showToast to display a string indication the direction
-     *   of rotation of the rotary encoder. This method is called through
-     *   JNI once the direction is determined by the ISR
+     * jniReturn method:
+     *   Receives the type of action (short, long or double press) as well
+     *   as the button the input occured on. Based on this it formats a
+     *   string "action" and calls broadcastAction with it.
      * ====================================================================
      * authors(s): Stephan Greto-McGrath
      * ====================================================================
@@ -92,14 +93,23 @@ public class ButtonService extends Service {
 //        showToast(broadcast_action);
         Log.d(TAG, broadcast_action);
         if (!broadcast_action.equals("INVALID")){
-            broadcastDirection(broadcast_action);
+            broadcastAction(broadcast_action);
         }
 
 
     }
 
-
-    public void broadcastDirection(String action){
+    /**
+     * ====================================================================
+     * broadcastAction method:
+     *   Pretty self explanatory, it broadcasts the type of input action
+     *   with the button the input occured on for other apps to pick up and
+     *   act on.
+     * ====================================================================
+     * authors(s): Stephan Greto-McGrath
+     * ====================================================================
+     */
+    public void broadcastAction(String action){
         Intent i = new Intent();
         i.setAction("com.google.hal." + action);
         MyContext.sendBroadcast(i);

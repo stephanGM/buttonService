@@ -109,7 +109,7 @@ Java_com_google_hal_buttonservice_ButtonService_startRoutine(JNIEnv *env, jclass
         first_press[k] = true;
     }
 // TODO get system priviledges so it can set itself up
-//    setup_gpios(gpio1, gpio2);
+//    setup_gpios();
 
     /* cache JVM to attach native thread */
     int status = (*env)->GetJavaVM(env, &jvm);
